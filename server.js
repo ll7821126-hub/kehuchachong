@@ -1,0 +1,27 @@
+import express from 'express';
+import cookieParser from 'cookie-parser';
+import bcrypt from 'bcryptjs';
+import pg from 'pg';
+import { randomUUID } from 'node:crypto';
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const {Pool}=pg; const app=express(); const pool=new Pool({connectionString:process.env.DATABASE_URL,ssl:process.env.NODE_ENV==='production'?{rejectUnauthorized:false}:false});
+app.use(express.json({limit:'12mb'})); app.use(cookieParser()); app.use(express.static(path.dirname(fileURLToPath(import.meta.url))));
+const q=(text,params=[])=>pool.query(text,params); const id=()=>randomUUID();
+async function init(){await q(await fs.readFile('schema.sql','utf8')); const n=await q('SELECT count(*)::int AS n FROM users'); if(!n.rows[0].n){const username=process.env.ADMIN_USERNAME||'admin',password=process.env.ADMIN_PASSWORD||'change-me';await q('INSERT INTO users(id,name,username,password_hash,role) VALUES($1,$2,$3,$4,$5)',[id(),'管理员',username,await bcrypt.hash(password,12),'admin']);}}
+async function auth(req,res,next){const token=req.cookies.cr_session;if(!token)return res.status(401).json({error:'未登录'});const r=await q('SELECT u.id,u.name,u.username,u.role,u.active FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=$1 AND s.expires_at>NOW()',[token]);if(!r.rowCount||!r.rows[0].active)return res.status(401).json({error:'会话已失效'});req.user=r.rows[0];next()}
+const admin=(req,res,next)=>req.user.role==='admin'?next():res.status(403).json({error:'无权限'});
+app.get('/api/auth/me',auth,(req,res)=>res.json({user:req.user}));
+app.post('/api/auth/login',async(req,res)=>{const {username,password}=req.body;const r=await q('SELECT * FROM users WHERE username=$1',[username]);if(!r.rowCount||!r.rows[0].active||!(await bcrypt.compare(password,r.rows[0].password_hash)))return res.status(401).json({error:'账号或密码错误'});const token=randomUUID();await q("INSERT INTO sessions(token,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '7 days')",[token,r.rows[0].id]);res.cookie('cr_session',token,{httpOnly:true,sameSite:'lax',secure:process.env.NODE_ENV==='production',maxAge:604800000});res.json({user:{id:r.rows[0].id,name:r.rows[0].name,username:r.rows[0].username,role:r.rows[0].role}})});
+app.post('/api/auth/logout',auth,async(req,res)=>{await q('DELETE FROM sessions WHERE token=$1',[req.cookies.cr_session]);res.clearCookie('cr_session');res.json({ok:true})});
+app.get('/api/customers',auth,async(req,res)=>{const own=req.user.role==='admin'?'':` AND c.sales_id='${req.user.id}'`;const r=await q(`SELECT c.*,u.name AS sales_name FROM customers c JOIN users u ON u.id=c.sales_id WHERE 1=1${own} AND ($1='' OR c.name ILIKE '%'||$1||'%' OR c.source ILIKE '%'||$1||'%') ORDER BY c.created_at DESC`,[req.query.q||'']);res.json({customers:r.rows})});
+app.post('/api/customers',auth,async(req,res)=>{const {name,source='',status='跟进中',note='',avatar_url=''}=req.body;if(!name?.trim())return res.status(400).json({error:'客户姓名不能为空'});const dup=await q('SELECT id,name FROM customers WHERE lower(name)=lower($1) AND ($2=$3 OR sales_id=$2)',[name,req.user.role==='admin'?'*':req.user.id,'*']);if(dup.rowCount)return res.status(409).json({error:'发现重复客户',duplicates:dup.rows});const r=await q('INSERT INTO customers(id,name,source,status,sales_id,note,avatar_url) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *',[id(),name.trim(),source,status,req.user.id,note,avatar_url]);res.status(201).json({customer:r.rows[0]})});
+app.patch('/api/customers/:id',auth,async(req,res)=>{const own=req.user.role==='admin'?'':` AND sales_id='${req.user.id}'`;const r=await q(`UPDATE customers SET name=COALESCE($1,name),source=COALESCE($2,source),status=COALESCE($3,status),note=COALESCE($4,note),avatar_url=COALESCE($5,avatar_url) WHERE id=$6${own} RETURNING *`,[req.body.name,req.body.source,req.body.status,req.body.note,req.body.avatar_url,req.params.id]);if(!r.rowCount)return res.status(404).json({error:'客户不存在或无权限'});res.json({customer:r.rows[0]})});
+app.delete('/api/customers/:id',auth,async(req,res)=>{const own=req.user.role==='admin'?'':` AND sales_id='${req.user.id}'`;const r=await q(`DELETE FROM customers WHERE id=$1${own} RETURNING id`,[req.params.id]);if(!r.rowCount)return res.status(404).json({error:'客户不存在或无权限'});res.json({ok:true})});
+app.get('/api/users',auth,admin,async(req,res)=>res.json({users:(await q('SELECT id,name,username,role,active,created_at FROM users ORDER BY created_at')).rows}));
+app.post('/api/users',auth,admin,async(req,res)=>{const {name,username,password}=req.body;if(!name||!username||!password||password.length<6)return res.status(400).json({error:'资料不完整'});const r=await q('INSERT INTO users(id,name,username,password_hash,role) VALUES($1,$2,$3,$4,$5) RETURNING id,name,username,role,active',[id(),name,username,await bcrypt.hash(password,12),'sales']);res.status(201).json({user:r.rows[0]})});
+app.get('/api/stats',auth,async(req,res)=>{const own=req.user.role==='admin'?'':` AND sales_id='${req.user.id}'`;const r=await q(`SELECT count(*)::int AS total,count(*) FILTER(WHERE created_at::date=CURRENT_DATE)::int AS today,count(*) FILTER(WHERE status='跟进中')::int AS following,count(*) FILTER(WHERE status='已成交')::int AS won FROM customers WHERE 1=1${own}`);res.json(r.rows[0])});
+app.get('*',(req,res)=>res.sendFile(path.join(path.dirname(fileURLToPath(import.meta.url)),'index.html')));
+init().then(()=>app.listen(process.env.PORT||10000,'0.0.0.0')).catch(e=>{console.error(e);process.exit(1)});
+
