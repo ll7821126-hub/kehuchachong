@@ -140,6 +140,70 @@ export function createApp(pool, { production = false } = {}) {
     const r = await pool.query(`SELECT count(*)::int AS total,count(*) FILTER(WHERE (c.created_at AT TIME ZONE 'Asia/Taipei')::date=(NOW() AT TIME ZONE 'Asia/Taipei')::date)::int AS today,count(*) FILTER(WHERE c.status='跟进中')::int AS following,count(*) FILTER(WHERE c.status='已成交')::int AS won FROM customers c WHERE ${scope.sql}`, scope.args);
     const by = await pool.query(`SELECT u.id,u.name,count(c.id) FILTER(WHERE (c.created_at AT TIME ZONE 'Asia/Taipei')::date=(NOW() AT TIME ZONE 'Asia/Taipei')::date)::int AS today FROM users u LEFT JOIN customers c ON c.sales_id=u.id WHERE ($1::boolean OR u.id=$2) GROUP BY u.id,u.name ORDER BY u.name`, [req.user.role === 'admin', req.user.id]); res.json({ ...r.rows[0], bySales: by.rows });
   }));
+  app.get('/api/backup', admin, wrap(async (req, res) => {
+    const c = await pool.connect(); try {
+      await c.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const users = (await c.query('SELECT id,name,username,role,active FROM users ORDER BY id')).rows;
+      const customers = (await c.query('SELECT * FROM customers ORDER BY id')).rows.map(x => ({ id: x.id, name: x.name, source: x.source, status: x.status, sales_id: x.sales_id, note: x.note, created_at: x.created_at, avatar: x.avatar ? `data:image/png;base64,${Buffer.from(x.avatar).toString('base64')}` : '', avatar_hash: x.avatar_hash }));
+      const content = JSON.stringify({ users, customers }); const checksum = hash(content);
+      await c.query('COMMIT');
+      res.json({ version: 2, exportedAt: new Date().toISOString(), customerCount: customers.length, avatarCount: customers.filter(x => x.avatar).length, checksum, data: { users, customers } });
+    } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+  }));
+  app.post('/api/import/preview', admin, wrap(async (req, res) => {
+    const backup = req.body;
+    if (backup.version !== 2 || !backup.data || !Array.isArray(backup.data.users) || !Array.isArray(backup.data.customers)) fail('请使用此系统下载的版本 2 备份');
+    if (hash(JSON.stringify(backup.data)) !== backup.checksum) fail('备份校验值不符，文件可能被修改或损坏');
+    const { users, customers } = backup.data;
+    if (users.length > 1000 || customers.length > 10000) fail('备份过大，请分批恢复');
+    if (backup.customerCount !== customers.length || backup.avatarCount !== customers.filter(x => x.avatar).length) fail('备份数量与内容不一致');
+    const ids = new Set(), usernames = new Set();
+    for (const u of users) {
+      text(u.id, '账号编号', 100, true); const a = account(u);
+      if (ids.has(u.id) || usernames.has(a.username)) fail('备份账号编号或用户名重复');
+      if (!['sales', 'admin'].includes(u.role) || typeof u.active !== 'boolean') fail('备份账号角色或状态无效');
+      ids.add(u.id); usernames.add(a.username);
+    }
+    const seen = new Set();
+    for (const x of customers) {
+      text(x.id, '客户编号', 100, true); if (seen.has(x.id)) fail('备份客户编号重复'); seen.add(x.id);
+      if (!ids.has(x.sales_id)) fail('备份客户没有对应的登记账号');
+      if (!x.created_at || Number.isNaN(Date.parse(x.created_at))) fail('备份登记时间无效');
+      const valid = await customer(x); if ((valid.hash || null) !== (x.avatar_hash || null)) fail(`客户 ${x.name} 的头像校验失败`);
+    }
+    const existingUsers = (await pool.query('SELECT id,username FROM users')).rows;
+    for (const u of users) {
+      if (existingUsers.some(x => x.id === u.id && x.username !== u.username)) fail('备份账号编号与现有账号冲突');
+      if (existingUsers.some(x => x.username === u.username && x.id !== u.id)) fail('备份用户名与现有账号冲突');
+    }
+    const current = new Set((await pool.query('SELECT id FROM customers')).rows.map(x => x.id));
+    const added = customers.filter(x => !current.has(x.id)).length;
+    const token = randomBytes(24).toString('base64url');
+    // Stored on the server, scoped to the administrator and expires after 15 minutes.
+    await pool.query("INSERT INTO restore_previews(token,user_id,payload,expires_at) VALUES($1,$2,$3,NOW()+INTERVAL '15 minutes')", [hash(token), req.user.id, JSON.stringify(backup)]);
+    res.json({ token, customersAdded: added, customersUpdated: customers.length - added, accountsAdded: users.filter(u => !existingUsers.some(x => x.id === u.id)).length, avatars: backup.avatarCount, total: customers.length });
+  }));
+  app.post('/api/import/confirm', admin, wrap(async (req, res) => {
+    const token = text(req.body.token, '预览凭据', 100, true), c = await pool.connect();
+    try {
+      await c.query('BEGIN'); await c.query('SELECT pg_advisory_xact_lock(9001002)');
+      const r = await c.query('SELECT payload FROM restore_previews WHERE token=$1 AND user_id=$2 AND expires_at>NOW() FOR UPDATE', [hash(token), req.user.id]);
+      if (!r.rows.length) fail('预览已过期或已恢复，请重新选择备份');
+      const backup = typeof r.rows[0].payload === 'string' ? JSON.parse(r.rows[0].payload) : r.rows[0].payload;
+      let accountsAdded = 0, customersAdded = 0, customersUpdated = 0;
+      for (const u of backup.data.users) {
+        // Passwords and administrator privileges are not restored from uploaded files.
+        const x = await c.query("INSERT INTO users(id,name,username,password_hash,role,active,must_change_password) VALUES($1,$2,$3,$4,'sales',FALSE,TRUE) ON CONFLICT(id) DO NOTHING RETURNING id", [u.id, u.name, u.username, await bcrypt.hash(randomBytes(24).toString('base64url'), 10)]); accountsAdded += x.rows.length;
+      }
+      for (const x of backup.data.customers) {
+        const valid = await customer(x), old = await c.query('SELECT id FROM customers WHERE id=$1', [x.id]);
+        await c.query('INSERT INTO customers(id,name,normalized_name,source,status,sales_id,note,avatar,avatar_hash,avatar_dhash,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name,normalized_name=EXCLUDED.normalized_name,source=EXCLUDED.source,status=EXCLUDED.status,note=EXCLUDED.note,avatar=COALESCE(EXCLUDED.avatar,customers.avatar),avatar_hash=COALESCE(EXCLUDED.avatar_hash,customers.avatar_hash),avatar_dhash=COALESCE(EXCLUDED.avatar_dhash,customers.avatar_dhash),updated_at=NOW()', [x.id, valid.name, valid.normalized_name, valid.source, valid.status, x.sales_id, valid.note, valid.bytes, valid.hash, valid.dhash, x.created_at]);
+        old.rows.length ? customersUpdated++ : customersAdded++;
+      }
+      await c.query('DELETE FROM restore_previews WHERE token=$1', [hash(token)]); await c.query('COMMIT');
+      res.json({ accountsAdded, customersAdded, customersUpdated, complete: true });
+    } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
+  }));
   // Only public assets are served. Source, backups and environment files are never static files.
   app.use(express.static(`${root}public`, { dotfiles: 'deny', maxAge: '1h' }));
   app.get('/', (req, res) => res.sendFile(`${root}public/index.html`));
