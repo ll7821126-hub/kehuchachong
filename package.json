@@ -1,3 +1,25 @@
 {
-  "name":"customer-registry-server","version":"1.0.0","private":true,"type":"module","scripts":{"start":"node server.js","dev":"node --watch server.js"},"dependencies":{"bcryptjs":"^2.4.3","cookie-parser":"^1.4.6","express":"^4.21.2","pg":"^8.13.1","uuid":"^11.0.5"}}
-
+  "name": "kehuchachong",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "build": "node scripts/prepare-assets.js",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check server.js && node --check public/app.js && node --check public/ocr.js"
+  },
+  "dependencies": {
+    "bcryptjs": "3.0.2",
+    "cookie-parser": "1.4.7",
+    "express": "4.21.2",
+    "express-rate-limit": "7.5.0",
+    "helmet": "8.1.0",
+    "pg": "8.16.3",
+    "sharp": "0.34.3",
+    "web-sdk-pp-ocrv6": "0.2.0"
+  }
+}
