@@ -155,6 +155,65 @@ function crop(source, x, y, width, height, output = 256) {
   context.drawImage(source.canvas, left, top, right - left, bottom - top, 0, 0, canvas.width, canvas.height);
   return canvas;
 }
+/*
+ * OCR engines are particularly prone to confusing a capital J, a lowercase
+ * l, and the digit 1 when the name is only a few pixels high.  Do not silently
+ * substitute one character for another: that creates a wrong customer record
+ * which is much harder to discover than a name marked for review.  Instead we
+ * run the name crop through a couple of deterministic, local preprocessing
+ * passes.  The medium recognizer then gets enough pixels to distinguish the
+ * top hook/descender of J from the straight stem of l.
+ */
+function enhanceNameCanvas(canvas, mode = 'contrast') {
+  if (!canvas || mode === 'original') return canvas;
+  const context = canvas.getContext('2d', { willReadFrequently: true });
+  if (!context) return canvas;
+  const frame = context.getImageData(0, 0, canvas.width, canvas.height);
+  const pixels = frame.data;
+  let mean = 0, count = 0;
+  for (let i = 0; i < pixels.length; i += 16) {
+    mean += .299 * pixels[i] + .587 * pixels[i + 1] + .114 * pixels[i + 2]; count++;
+  }
+  mean /= Math.max(1, count);
+  const gain = mode === 'strong' ? 1.85 : 1.42;
+  const threshold = Math.max(72, Math.min(192, mean));
+  const clamp = value => Math.max(0, Math.min(255, Math.round(value)));
+  for (let i = 0; i < pixels.length; i += 4) {
+    const luminance = .299 * pixels[i] + .587 * pixels[i + 1] + .114 * pixels[i + 2];
+    // Keep polarity (white-on-dark stays white-on-dark) so the detector does
+    // not mistake the text background for another line.
+    const value = mode === 'strong'
+      ? (luminance >= threshold ? 255 : 0)
+      : clamp((luminance - mean) * gain + mean);
+    pixels[i] = value; pixels[i + 1] = value; pixels[i + 2] = value;
+  }
+  context.putImageData(frame, 0, 0);
+  return canvas;
+}
+function nameRetryVariants(source, box) {
+  const h = Math.max(12, box.y1 - box.y0);
+  const width = Math.max(80, box.x1 - box.x0);
+  const base = crop(source, box.x0 - h * .35, box.y0 - h * .75, width + h * .7, h * 2.5, 960);
+  if (!base) return [];
+  // Keep the original pass first.  The additional passes are intentionally
+  // grayscale/contrast only; no character replacement is performed here.
+  return [base, enhanceNameCanvas(crop(source, box.x0 - h * .35, box.y0 - h * .75, width + h * .7, h * 2.5, 960), 'contrast'), enhanceNameCanvas(crop(source, box.x0 - h * .35, box.y0 - h * .75, width + h * .7, h * 2.5, 960), 'strong')].filter(Boolean);
+}
+function retryLine(result) {
+  const lines = Array.isArray(result?.lines) ? result.lines : [];
+  return lines.map(line => {
+    const score = Number(line?.recognitionScore ?? line?.score ?? 0);
+    return { text: clean(line?.text), confidence: score <= 1 ? score * 100 : score };
+  }).filter(line => line.text && line.text.length <= 24 && /[\p{Script=Han}A-Za-z0-9]/u.test(line.text) && !/[，。！？!?；;：:]/u.test(line.text) && !CHAT.test(line.text) && !NOISE.test(line.text))
+    .sort((a, b) => b.confidence - a.confidence || b.text.length - a.text.length)[0] || null;
+}
+function latinNameRisk(value, confidence) {
+  const text = clean(value);
+  if (!/[A-Za-z]/.test(text)) return false;
+  // These are the glyphs most often confused in small Latin names.  This is a
+  // review hint only; it never changes the OCR result automatically.
+  return confidence < 88 || /(^|[^A-Za-z])[JlIil1|](?=[A-Za-z]|$)/.test(text);
+}
 function usefulAvatar(canvas) {
   const context = canvas?.getContext('2d', { willReadFrequently: true }); if (!context) return false;
   const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
@@ -284,12 +343,15 @@ window.runLocalOCR = async function(file, onProgress = () => {}) {
   if (!file || !String(file.type || '').startsWith('image/')) throw new Error('请选择 PNG、JPEG 或 WebP 图片');
   const { createOCR } = await import('/vendor/ocr/index.js');
   pipelinePromise ||= Promise.resolve(createOCR({
-    model: { det: 'small', rec: 'small' }, backend: 'wasm', execution: 'main', allowFallback: false, wasmPaths: '/vendor/ort/',
+    // The medium recognizer has a noticeably larger Latin dictionary than the
+    // small preset.  Keep detection small for memory use, but spend the model
+    // budget where it matters for names such as Jerry/Juice and Amy.
+    model: { det: 'small', rec: 'medium' }, backend: 'wasm', execution: 'main', allowFallback: false, wasmPaths: '/vendor/ort/',
     onProgress: event => {
       const percent = event?.progress === undefined ? '' : ' ' + Math.round(event.progress * 100) + '%';
       onProgress((event?.phase === 'download' ? '模型下载' : '正在' + (event?.phase || '识别') + '…') + percent);
     }
-  })).then(async ocr => { onProgress('正在加载 PP-OCRv6 繁体中文模型…'); await ocr.load(); return ocr; }).catch(error => { pipelinePromise = null; throw new Error('OCR 模型加载失败：' + (error?.message || String(error))); });
+  })).then(async ocr => { onProgress('正在加载 PP-OCRv6 繁体中文与英文增强模型…'); await ocr.load(); return ocr; }).catch(error => { pipelinePromise = null; throw new Error('OCR 模型加载失败：' + (error?.message || String(error))); });
   try {
     const source = await loadImage(file); const ocr = await pipelinePromise; const parts = splitParts(source); const all = [];
     for (let index = 0; index < parts.length; index++) {
@@ -303,21 +365,57 @@ window.runLocalOCR = async function(file, onProgress = () => {}) {
       const key = item.text + '|' + Math.round(((item.bbox.y0 + item.bbox.y1) / 2) / 8);
       if (!seen.has(key)) { seen.add(key); candidates.push(item); }
     }
-    for (const item of candidates.slice(0, 3)) {
-      if (item.confidence >= 85) continue;
-      const h = Math.max(12, item.bbox.y1 - item.bbox.y0);
-      const image = crop(source, item.bbox.x0 - h * .25, item.bbox.y0 - h * .6, item.bbox.x1 - item.bbox.x0 + h * .5, h * 2.2, 720);
-      if (!image) continue;
+    // Re-read every uncertain name with three local image variants.  Running
+    // the same line once at 720 px can still collapse the hook on J or the
+    // stem on l; consensus across variants is a safer correction than a
+    // hard-coded character map.
+    for (const item of candidates.slice(0, 6)) {
+      if (item.confidence >= 92 && !latinNameRisk(item.text, item.confidence)) continue;
+      const variants = nameRetryVariants(source, item.bbox);
+      if (!variants.length) continue;
+      const observations = [];
       try {
-        const retry = await ocr.ocr(image);
-        const best = (retry?.lines || []).map(line => {
-          const score = Number(line?.recognitionScore ?? line?.score ?? 0); return { text: clean(line?.text), confidence: score <= 1 ? score * 100 : score };
-        }).filter(value => value.text && !CHAT.test(value.text)).sort((a, b) => b.confidence - a.confidence)[0];
-        if (best && best.text && (best.confidence > item.confidence || Math.abs(best.text.length - item.text.length) <= 2)) {
-          if (best.text !== item.text) item.reviewReason = '两次识别结果不一致（' + item.text + ' / ' + best.text + '），请对照原图确认';
-          item.text = best.text; item.confidence = Math.max(item.confidence, best.confidence);
+        for (const image of variants) {
+          const best = retryLine(await ocr.ocr(image));
+          if (best) observations.push(best);
         }
-      } catch {}
+      } catch {
+        // Keep the full-image result when a single retry cannot be decoded.
+      }
+      if (observations.length) {
+        const grouped = new Map();
+        for (const observation of observations) {
+          const key = clean(observation.text).replace(/\s+/g, ' ');
+          const group = grouped.get(key) || { text: key, count: 0, confidence: 0 };
+          group.count += 1; group.confidence = Math.max(group.confidence, observation.confidence); grouped.set(key, group);
+        }
+        const winner = [...grouped.values()].sort((a, b) => b.count - a.count || b.confidence - a.confidence || b.text.length - a.text.length)[0];
+        const baseText = clean(item.text).replace(/\s+/g, ' ');
+        const disagreement = [...grouped.keys()].some(key => key !== baseText);
+        // Accept an alternative only when it is supported by at least two
+        // independent preprocessing passes, or when it is substantially more
+        // confident than the original.  In all other cases retain the first
+        // result and require a human check.
+        if (winner && winner.text && winner.text !== baseText &&
+            (winner.count >= 2 || winner.confidence >= item.confidence + 8) &&
+            Math.abs(winner.text.length - baseText.length) <= 3) {
+          item.text = winner.text;
+          item.confidence = Math.max(item.confidence, winner.confidence);
+        } else if (winner?.text === baseText) {
+          item.confidence = Math.max(item.confidence, winner.confidence);
+        }
+        if (disagreement) {
+          const alternatives = [...grouped.values()].sort((a, b) => b.confidence - a.confidence).map(value => value.text).filter(Boolean).slice(0, 3);
+          item.reviewReason = `多次识别结果不一致（${[baseText, ...alternatives.filter(value => value !== baseText)].join(' / ')}），请对照原图确认`;
+          // A disagreement must remain below the confirmation threshold even
+          // if one pass happened to report a high score.
+          item.confidence = Math.min(item.confidence, 84);
+        }
+      }
+      if (latinNameRisk(item.text, item.confidence)) {
+        item.reviewReason ||= '英文姓名可能混淆 J、l 或 1，请对照截图核对';
+        item.confidence = Math.min(item.confidence, 84);
+      }
       item.nameConfirmed = item.confidence >= 85;
     }
     for (let index = 0; index < candidates.length; index++) {
