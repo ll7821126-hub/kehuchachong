@@ -90,12 +90,13 @@ function filterLines(lines, width, height, offsetY = 0) {
   const rows = [];
   for (const item of column.sort((a, b) => a.bbox.y0 - b.bbox.y0)) {
     const h = item.bbox.y1 - item.bbox.y0;
+    const center = (item.bbox.y0 + item.bbox.y1) / 2;
     const row = rows[rows.length - 1];
-    const gap = row ? item.bbox.y0 - row.bottom : Infinity;
+    const gap = row ? center - row.lastCenter : Infinity;
     const threshold = row ? Math.max(18, Math.max(row.height, h) * 2.8) : 0;
     if (row && gap <= threshold) {
-      row.items.push(item); row.bottom = Math.max(row.bottom, item.bbox.y1); row.height = Math.max(row.height, h);
-    } else rows.push({ items: [item], bottom: item.bbox.y1, height: h });
+      row.items.push(item); row.lastCenter = center; row.bottom = Math.max(row.bottom, item.bbox.y1); row.height = Math.max(row.height, h);
+    } else rows.push({ items: [item], lastCenter: center, bottom: item.bbox.y1, height: h });
   }
   const nameLike = item => {
     const text = clean(item.text).replace(/\s/g, '');
