@@ -127,10 +127,10 @@ export function createApp(pool, { production = false } = {}) {
     if (!r.rows[0]?.avatar) fail('头像不存在或无权限', 404); res.type('png').send(Buffer.from(r.rows[0].avatar));
   }));
   async function matches(client, x, excludeId = '') {
-    const r = await client.query('SELECT c.id,c.name,c.sales_id,c.created_at,c.avatar_hash,c.avatar_dhash,u.name AS sales_name FROM customers c JOIN users u ON u.id=c.sales_id WHERE c.normalized_name=$1 AND c.id<>$2', [x.normalized_name, excludeId]);
+    const r = await client.query('SELECT c.id,c.name,c.sales_id,c.status,c.created_at,c.avatar_hash,c.avatar_dhash,u.name AS sales_name FROM customers c JOIN users u ON u.id=c.sales_id WHERE c.normalized_name=$1 AND c.id<>$2', [x.normalized_name, excludeId]);
     return r.rows.map(c => ({ ...c, exact: !!x.hash && c.avatar_hash === x.hash, avatarSimilar: !!x.dhash && distance(x.dhash, c.avatar_dhash) <= 8 }));
   }
-  function matchPublic(c, user) { return { id: c.id, name: c.name, exact: c.exact, avatarSimilar: c.avatarSimilar, own: c.sales_id === user.id, registeredBy: c.sales_name || '未知业务员', registeredAt: c.created_at }; }
+  function matchPublic(c, user) { return { id: c.id, name: c.name, status: c.status || '新客户', exact: c.exact, avatarSimilar: c.avatarSimilar, own: c.sales_id === user.id, registeredBy: c.sales_name || '未知业务员', registeredAt: c.created_at }; }
   app.post('/api/customers/check', wrap(async (req, res) => { const x = await customer(req.body); res.json({ matches: (await matches(pool, x)).map(c => matchPublic(c, req.user)) }); }));
   app.post('/api/customers', wrap(async (req, res) => {
     const x = await customer(req.body), c = await pool.connect();
