@@ -22,4 +22,6 @@ table{min-width:760px!important}th{background:#fbfcfe!important;color:#6980a3!im
 @media(max-width:980px){.app-shell{grid-template-columns:220px 1fr!important}.metrics{grid-template-columns:repeat(2,1fr)!important}}
 @media(max-width:700px){.app-shell{display:block!important}.sidebar{padding:13px!important}.sidebar nav{display:flex!important;overflow:auto!important}.sidebar .nav-item{white-space:nowrap!important;width:auto!important}.page-content{padding:18px!important}.metrics{grid-template-columns:repeat(2,1fr)!important;gap:10px!important}}
 
+/* OCR input and draft controls */
+.dropzone input[type=file]{display:none!important}.dropzone label.btn{display:inline-flex!important;align-items:center!important;justify-content:center!important}.draft-fields{display:grid!important;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr)!important;gap:10px!important;flex:1!important}.draft-fields input{width:100%!important;min-width:0!important;padding:10px 12px!important;border:1px solid var(--line)!important;border-radius:10px!important;background:#fff!important;color:var(--ink)!important;outline:none!important}.draft-fields input:focus{border-color:var(--brand)!important;box-shadow:0 0 0 3px #00cbb833!important}.ocr-status{margin-top:12px!important;min-height:20px!important;font-weight:600!important;color:var(--muted)!important}
 
