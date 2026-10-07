@@ -87,8 +87,11 @@ export function createApp(pool, { production = false } = {}) {
   app.post('/api/auth/logout', wrap(async (req, res) => { if (req.cookies.cr_session) await pool.query('DELETE FROM sessions WHERE token=$1', [hash(req.cookies.cr_session)]); res.clearCookie('cr_session', { path: '/', secure: production, sameSite: 'strict' }); res.json({ ok: true }); }));
   app.post('/api/auth/password', auth, wrap(async (req, res) => {
     const pw = password(req.body.password);
-    if (typeof req.body.currentPassword !== 'string' || req.body.currentPassword.length > 128 || !await bcrypt.compare(req.body.currentPassword, req.user.password_hash)) fail('当前密码不正确', 400);
-    if (pw === req.body.currentPassword) fail('新密码必须与当前密码不同');
+    const current = typeof req.body.currentPassword === 'string' ? req.body.currentPassword : '';
+    // A forced first-login change is already authenticated by the login session.
+    // Later password changes still require the current password.
+    if (!req.user.must_change_password && (current.length > 128 || !await bcrypt.compare(current, req.user.password_hash))) fail('当前密码不正确', 400);
+    if (!req.user.must_change_password && pw === current) fail('新密码必须与当前密码不同');
     const c = await pool.connect(); try { await c.query('BEGIN'); await c.query('UPDATE users SET password_hash=$1,must_change_password=FALSE WHERE id=$2', [await bcrypt.hash(pw, 12), req.user.id]); await c.query('DELETE FROM sessions WHERE user_id=$1 AND token<>$2', [req.user.id, hash(req.cookies.cr_session)]); await c.query('COMMIT'); } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
     res.json({ ok: true });
   }));
