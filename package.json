@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node --env-file-if-exists=.env server.js",
+    "postinstall": "node scripts/prepare-assets.js",
     "build": "node scripts/prepare-assets.js",
     "test": "node --test tests/*.test.js",
     "check": "node --check server.js && node --check public/app.js && node --check public/ocr.js"
