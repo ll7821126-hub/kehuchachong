@@ -37,7 +37,7 @@ export function createApp(pool, { production = false } = {}) {
   app.use(helmet({ contentSecurityPolicy: { directives: {
     defaultSrc: ["'self'"], scriptSrc: ["'self'", "'wasm-unsafe-eval'", 'https://esm.sh'], styleSrc: ["'self'", "'unsafe-inline'"],
     imgSrc: ["'self'", 'data:', 'blob:'], workerSrc: ["'self'", 'blob:'],
-    connectSrc: ["'self'", 'https://esm.sh', 'https://huggingface.co', 'https://*.huggingface.co', 'https://*.hf.co', 'https://cdn-lfs.hf.co'],
+    connectSrc: ["'self'", 'https://esm.sh', 'https://huggingface.co', 'https://*.huggingface.co', 'https://*.hf.co', 'https://cdn-lfs.hf.co', 'https://chenmohan123.github.io'],
     upgradeInsecureRequests: production ? [] : null
   } }, crossOriginEmbedderPolicy: false }));
   app.use(express.json({ limit: '40mb' })); app.use(cookieParser());
@@ -211,4 +211,5 @@ export function createApp(pool, { production = false } = {}) {
   app.use((err, req, res, next) => { const status = err.status || (err.code === '23505' ? 409 : 500); if (status === 500) console.error('Request failed:', err.code || err.message); res.status(status).json({ error: status === 500 ? '服务器暂时无法处理请求，请稍后重试' : err.code === '23505' ? '账号已存在或资料冲突' : err.message }); });
   return app;
 }
+
 
