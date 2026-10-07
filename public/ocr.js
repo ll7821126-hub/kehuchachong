@@ -166,45 +166,103 @@ function usefulAvatar(canvas) {
   const variance = sum2 / count - (sum / count) ** 2;
   return variance > 120;
 }
-function avatarScore(canvas) {
-  const context = canvas?.getContext('2d', { willReadFrequently: true }); if (!context) return -Infinity;
-  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
-  let sum = 0, sum2 = 0, chroma = 0, count = 0;
-  const step = Math.max(1, Math.floor(Math.min(canvas.width, canvas.height) / 28));
-  for (let y = step; y < canvas.height - step; y += step) for (let x = step; x < canvas.width - step; x += step) {
-    const index = (y * canvas.width + x) * 4;
-    const value = .299 * data[index] + .587 * data[index + 1] + .114 * data[index + 2];
-    sum += value; sum2 += value * value;
-    chroma += Math.max(data[index], data[index + 1], data[index + 2]) - Math.min(data[index], data[index + 1], data[index + 2]); count++;
+/*
+ * Locate the thumbnail from its circular boundary rather than from image
+ * texture.  A texture-only search tends to select a person's face, sky, or a
+ * message preview inside the avatar.  The old site used this boundary test;
+ * keeping it here also means a low-contrast portrait is still cropped at the
+ * correct position.
+ */
+function avatarBoundaryScore(image, centerX, centerY, size) {
+  const { data, width, height } = image;
+  if (size < 12 || centerX - size / 2 < 1 || centerY - size / 2 < 1 ||
+      centerX + size / 2 >= width - 1 || centerY + size / 2 >= height - 1) return -Infinity;
+  const pixel = (x, y) => {
+    const px = Math.max(0, Math.min(width - 1, Math.round(x)));
+    const py = Math.max(0, Math.min(height - 1, Math.round(y)));
+    const index = (py * width + px) * 4;
+    return [data[index], data[index + 1], data[index + 2]];
+  };
+  const difference = (a, b) => Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]);
+  const innerOuterDiff = [], outerPixels = [];
+  for (let index = 0; index < 24; index++) {
+    const angle = index * Math.PI * 2 / 24;
+    const inner = pixel(centerX + Math.cos(angle) * size * .41, centerY + Math.sin(angle) * size * .41);
+    const outerRadius = size * .54 / Math.max(Math.abs(Math.cos(angle)), Math.abs(Math.sin(angle)));
+    const outer = pixel(centerX + Math.cos(angle) * outerRadius, centerY + Math.sin(angle) * outerRadius);
+    outerPixels.push(outer);
+    innerOuterDiff.push(difference(inner, outer) / 3);
   }
-  if (!count) return -Infinity;
-  const variance = sum2 / count - (sum / count) ** 2;
-  return variance + chroma / count * .45;
+  // A small texture check prevents a plain background square from being
+  // mistaken for an avatar while not deciding where the avatar is located.
+  let texture = 0, textureSamples = 0, textureStep = size * .14;
+  for (let y = -2; y <= 2; y++) for (let x = -2; x <= 1; x++) {
+    if (x * x + y * y > 5) continue;
+    texture += difference(pixel(centerX + x * textureStep, centerY + y * textureStep),
+      pixel(centerX + (x + 1) * textureStep, centerY + y * textureStep)) / 3;
+    textureSamples++;
+  }
+  const mean = innerOuterDiff.reduce((sum, value) => sum + value, 0) / innerOuterDiff.length;
+  const variance = innerOuterDiff.reduce((sum, value) => sum + (value - mean) ** 2, 0) / innerOuterDiff.length;
+  const edgeFraction = innerOuterDiff.filter(value => value >= 13).length / innerOuterDiff.length;
+  const medianOuter = [0, 1, 2].map(channel => outerPixels.map(value => value[channel]).sort((a, b) => a - b)[12]);
+  const outerVariance = outerPixels.reduce((sum, value) => sum + difference(value, medianOuter) / 3, 0) / outerPixels.length;
+  if (outerPixels.filter(value => difference(value, medianOuter) / 3 <= 12).length < 20) return -Infinity;
+  for (const vertical of [-.24, .24]) {
+    if (![-.22, 0, .22].some(horizontal => difference(pixel(centerX + size * horizontal, centerY + size * vertical), medianOuter) / 3 >= 15)) return -Infinity;
+  }
+  return mean * 1.25 - Math.sqrt(variance) * .2 + edgeFraction * 35 - outerVariance * 1.8 + texture / Math.max(1, textureSamples) * .08;
 }
+
 function locateAvatar(source, box, rowGap = 0) {
-  const textHeight = Math.max(8, box.y1 - box.y0);
-  const estimated = rowGap >= textHeight * 2.1 ? rowGap * .66 : textHeight * 3.1;
-  const maxSize = Math.min(box.x0 - textHeight * .35, source.height - 4, Math.max(textHeight * 2.1, source.width * .24));
-  const baseSize = Math.max(textHeight * 2.1, Math.min(maxSize, estimated));
-  if (baseSize < 24) return null;
-  const rowCenter = (box.y0 + box.y1) / 2;
-  let best = null;
-  // Search a narrow area immediately to the left of the first name line. This
-  // keeps the complete thumbnail at its source resolution and avoids cropping
-  // the right half of an avatar (the previous fixed x offset did that).
-  for (const scale of [.86, .94, 1, 1.06, 1.14]) {
-    const size = Math.max(24, Math.min(maxSize, baseSize * scale));
-    const xStart = box.x0 - size * 1.55, xEnd = box.x0 - size * .52;
-    const yStart = rowCenter + size * .05 - size * .22, yEnd = rowCenter + size * .05 + size * .22;
-    const step = Math.max(3, size * .12);
-    for (let centerX = xStart; centerX <= xEnd; centerX += step) for (let centerY = yStart; centerY <= yEnd; centerY += step) {
-      if (centerX - size / 2 < 0 || centerX + size / 2 > source.width || centerY - size / 2 < 0 || centerY + size / 2 > source.height) continue;
-      const avatar = crop(source, centerX - size / 2, centerY - size / 2, size, size, null);
-      const score = avatarScore(avatar);
-      if (score > (best?.score ?? -Infinity)) best = { canvas: avatar, centerX, centerY, size, score };
+  const textHeight = Math.max(6, box.y1 - box.y0);
+  const rightLimit = box.x0 - Math.max(2, textHeight * .15);
+  const maxSize = Math.min(textHeight * 5.1, rightLimit - 2, source.height - 2);
+  if (maxSize < 16 || !source?.canvas) return null;
+
+  // Read one downscaled image for the search.  The selected coordinates remain
+  // in source pixels so the returned crop keeps its natural square resolution.
+  const scale = Math.min(1, 1600 / Math.max(source.width, source.height));
+  const probe = document.createElement('canvas');
+  probe.width = Math.max(1, Math.round(source.width * scale));
+  probe.height = Math.max(1, Math.round(source.height * scale));
+  const probeContext = probe.getContext('2d', { willReadFrequently: true });
+  if (!probeContext) return null;
+  probeContext.drawImage(source.canvas, 0, 0, probe.width, probe.height);
+  const probeImage = { data: probeContext.getImageData(0, 0, probe.width, probe.height).data, width: probe.width, height: probe.height };
+  const scoreAt = (centerX, centerY, size) => {
+    const top = centerY - size / 2;
+    if (centerX - size / 2 < 0 || centerX + size / 2 > rightLimit || top < 0 || centerY + size / 2 > source.height ||
+        top > box.y0 + textHeight * .45 || centerY + size / 2 < box.y1 - textHeight * .2) return -Infinity;
+    return avatarBoundaryScore(probeImage, centerX * scale, centerY * scale, size * scale);
+  };
+
+  const initial = Math.max(16, Math.min(textHeight * 3, maxSize));
+  let best = { centerX: Math.max(initial / 2, rightLimit - initial * .65), centerY: (box.y0 + box.y1) / 2 + textHeight, size: initial, score: -Infinity };
+  const sizes = [1.6, 2, 2.4, 2.8, 3.2, 3.6, 4, 4.4, 4.8, 5.1].map(multiplier => Math.min(maxSize, textHeight * multiplier));
+  for (const size of [...new Set(sizes)]) {
+    if (size < 16) continue;
+    const step = Math.max(1 / scale, size * .08);
+    const minX = Math.max(size / 2 + 1, rightLimit - size * 1.8);
+    const maxX = rightLimit - size / 2;
+    const minY = Math.max(size / 2 + 1, (box.y0 + box.y1) / 2 - textHeight * .16);
+    const maxY = Math.min(source.height - size / 2 - 1, (box.y0 + box.y1) / 2 + textHeight * .65);
+    for (let centerX = minX; centerX <= maxX; centerX += step) for (let centerY = minY; centerY <= maxY; centerY += step) {
+      const score = scoreAt(centerX, centerY, size);
+      if (score > best.score) best = { centerX, centerY, size, score };
     }
   }
-  return best && best.score > 115 && usefulAvatar(best.canvas) ? best : null;
+  const rough = best;
+  for (const sizeScale of [.94, 1, 1.06]) for (const xOffset of [-.04, 0, .04]) for (const yOffset of [-.04, 0, .04]) {
+    const size = rough.size * sizeScale;
+    const centerX = rough.centerX + rough.size * xOffset;
+    const centerY = rough.centerY + rough.size * yOffset;
+    const score = scoreAt(centerX, centerY, size);
+    if (score > best.score) best = { centerX, centerY, size, score };
+  }
+  if (best.score < 38) return null;
+  const canvas = crop(source, best.centerX - best.size / 2, best.centerY - best.size / 2, best.size, best.size, null);
+  return canvas ? { ...best, canvas, reliable: true } : null;
 }
 function nameImage(source, box) {
   const h = Math.max(8, box.y1 - box.y0);
