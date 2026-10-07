@@ -62,7 +62,22 @@ export function createApp(pool, { production = false } = {}) {
   app.post('/api/auth/login', rateLimit({ windowMs: 15 * 60 * 1000, limit: 20, standardHeaders: 'draft-7', legacyHeaders: false, message: { error: '登录尝试过多，请稍后再试' } }), wrap(async (req, res) => {
     const username = text(req.body.username, '账号', 40, true).toLowerCase();
     if (typeof req.body.password !== 'string' || req.body.password.length > 128) fail('账号或密码错误', 401);
-    const r = await pool.query('SELECT * FROM users WHERE lower(username)=$1', [username]), u = r.rows[0];
+    let r = await pool.query('SELECT * FROM users WHERE lower(username)=$1', [username]);
+    let u = r.rows[0];
+    // If the Render environment username was changed after the first boot, allow
+    // the configured admin credentials to recover the original admin row once.
+    // This avoids a confusing lockout when the database already contains `admin`
+    // but the dashboard environment is configured with a different username.
+    const configuredAdmin = String(process.env.ADMIN_USERNAME || '').trim().toLowerCase();
+    const configuredPassword = process.env.ADMIN_PASSWORD;
+    if (!u && configuredAdmin && username === configuredAdmin && configuredPassword && req.body.password === configuredPassword) {
+      const existing = await pool.query("SELECT * FROM users WHERE role='admin' ORDER BY created_at LIMIT 1");
+      if (existing.rows[0]) {
+        const replacement = existing.rows[0];
+        const updated = await pool.query('UPDATE users SET username=$1,password_hash=$2,must_change_password=TRUE WHERE id=$3 RETURNING *', [username, await bcrypt.hash(configuredPassword, 12), replacement.id]);
+        u = updated.rows[0];
+      }
+    }
     if (!u || !u.active || !await bcrypt.compare(req.body.password, u.password_hash)) fail('账号或密码错误', 401);
     const token = randomBytes(32).toString('base64url');
     await pool.query("INSERT INTO sessions(token,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '7 days')", [hash(token), u.id]);
