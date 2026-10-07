@@ -1,6 +1,6 @@
 import sharp from 'sharp';
 import { createHash } from 'node:crypto';
-export const statuses = ['跟进中', '已成交', '暂停跟进', '无效客户'];
+export const statuses = ['新客户', '跟进中', '已成交', '暂停跟进', '无效客户'];
 export function fail(message, status = 400) { throw Object.assign(new Error(message), { status }); }
 export function text(value, label, max, required = false) {
   if (value === undefined || value === null) value = '';
@@ -37,8 +37,8 @@ export function distance(a, b) {
   while (n) { n &= n - 1n; count++; } return count;
 }
 export async function customer(body) {
-  const name = text(body.name, '客户姓名', 120, true), status = body.status || '跟进中';
+  const name = text(body.name ?? body.customerName, '客户姓名', 120, true), status = body.status || '新客户';
   if (!statuses.includes(status)) fail('无效跟进状态');
-  return { name, normalized_name: normalize(name), source: text(body.source, '来源', 200), note: text(body.note, '备注', 4000), status, ...(await image(body.avatar)) };
+  return { name, normalized_name: normalize(name), source: text(body.source, '来源', 200), note: text(body.note ?? body.notes, '备注', 4000), status, ...(await image(body.avatar ?? body.avatarData)) };
 }
 
