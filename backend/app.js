@@ -223,7 +223,13 @@ export function createApp(pool, { production = false } = {}) {
     } catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
   }));
   // Only public assets are served. Source, backups and environment files are never static files.
-  app.use(express.static(`${root}public`, { dotfiles: 'deny', maxAge: '1h' }));
+  app.use(express.static(`${root}public`, {
+    dotfiles: 'deny',
+    maxAge: '1h',
+    setHeaders(res, filePath) {
+      if (/\.(?:html|js|css)$/i.test(filePath)) res.set('Cache-Control', 'no-cache, must-revalidate');
+    }
+  }));
   app.get('/', (req, res) => res.sendFile(`${root}public/index.html`));
   app.use((req, res) => res.status(404).json({ error: '页面或接口不存在' }));
   app.use((err, req, res, next) => { const status = err.status || (err.code === '23505' ? 409 : 500); if (status === 500) console.error('Request failed:', err.code || err.message); res.status(status).json({ error: status === 500 ? '服务器暂时无法处理请求，请稍后重试' : err.code === '23505' ? '账号已存在或资料冲突' : err.message }); });
