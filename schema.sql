@@ -13,4 +13,5 @@ ALTER TABLE customers ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL D
 CREATE INDEX IF NOT EXISTS customers_normalized_name_idx ON customers(normalized_name);
 CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
 CREATE TABLE IF NOT EXISTS restore_previews (token TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), payload JSONB NOT NULL, expires_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 
