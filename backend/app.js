@@ -10,10 +10,32 @@ import { account, customer, distance, fail, normalize, password, text, image } f
 const root = fileURLToPath(new URL('../', import.meta.url));
 const hash = value => createHash('sha256').update(value).digest('hex');
 const wrap = fn => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
-const fields = 'c.id,c.name,c.source,c.status,c.sales_id,c.note,c.created_at,c.updated_at,c.avatar_hash,u.name AS sales_name';
+// Keep duplicate information with each row so the customer list can call out
+// records that share a normalized name (and the stricter name+avatar match).
+// The correlated counts are deliberately calculated over the full table,
+// rather than only the current page/sales scope, so an admin sees the same
+// duplicate marker a sales user would see for a record they can access.
+const fields = 'c.id,c.name,c.source,c.status,c.sales_id,c.note,c.created_at,c.updated_at,c.avatar_hash,u.name AS sales_name,' +
+  '(SELECT COUNT(*)::int FROM customers c2 WHERE c2.normalized_name=c.normalized_name AND c2.normalized_name<>\'\' AND c2.id<>c.id) AS duplicate_name_count,' +
+  '(SELECT COUNT(*)::int FROM customers c2 WHERE c.avatar_hash IS NOT NULL AND c2.avatar_hash=c.avatar_hash AND c2.normalized_name=c.normalized_name AND c2.id<>c.id) AS duplicate_avatar_count';
 const own = (user, alias = 'c') => ({ sql: user.role === 'admin' ? 'TRUE' : `${alias}.sales_id=$1`, args: user.role === 'admin' ? [] : [user.id] });
 const publicUser = u => ({ id: u.id, name: u.name, username: u.username, role: u.role, active: u.active, must_change_password: u.must_change_password });
-function publicCustomer(c) { return { ...c, avatar: undefined, avatar_dhash: undefined, normalized_name: undefined, avatar_url: c.avatar_hash ? `/api/customers/${encodeURIComponent(c.id)}/avatar?v=${c.avatar_hash}` : '' }; }
+function publicCustomer(c) {
+  const duplicateNameCount = Number(c.duplicate_name_count || 0);
+  const duplicateAvatarCount = Number(c.duplicate_avatar_count || 0);
+  return {
+    ...c,
+    avatar: undefined,
+    avatar_dhash: undefined,
+    normalized_name: undefined,
+    duplicate_name_count: undefined,
+    duplicate_avatar_count: undefined,
+    duplicateNameCount,
+    duplicateAvatarCount,
+    isDuplicate: duplicateNameCount > 0,
+    avatar_url: c.avatar_hash ? `/api/customers/${encodeURIComponent(c.id)}/avatar?v=${c.avatar_hash}` : ''
+  };
+}
 export async function initialize(pool, env = process.env) {
   await pool.query(await readFile(new URL('../schema.sql', import.meta.url), 'utf8'));
   const c = await pool.connect();
