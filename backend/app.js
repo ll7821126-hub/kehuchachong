@@ -74,7 +74,7 @@ export function createApp(pool, { production = false } = {}) {
       const existing = await pool.query("SELECT * FROM users WHERE role='admin' ORDER BY created_at LIMIT 1");
       const replacement = u?.role === 'admin' ? u : existing.rows[0];
       if (replacement) {
-        const updated = await pool.query('UPDATE users SET username=$1,password_hash=$2,must_change_password=TRUE WHERE id=$3 RETURNING *', [username, await bcrypt.hash(configuredPassword, 12), replacement.id]);
+        const updated = await pool.query('UPDATE users SET username=$1,password_hash=$2,must_change_password=FALSE WHERE id=$3 RETURNING *', [username, await bcrypt.hash(configuredPassword, 12), replacement.id]);
         u = updated.rows[0];
       }
     }
