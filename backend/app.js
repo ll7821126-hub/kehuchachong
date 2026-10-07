@@ -24,6 +24,19 @@ export async function initialize(pool, env = process.env) {
       if (!env.ADMIN_PASSWORD || env.ADMIN_PASSWORD.length < 20) fail('首次启动需要设置至少 20 位随机 ADMIN_PASSWORD');
       const u = account({ name: '管理员', username: env.ADMIN_USERNAME || 'admin' });
       await c.query('INSERT INTO users(id,name,username,password_hash,role) VALUES($1,$2,$3,$4,$5)', [randomUUID(), u.name, u.username, await bcrypt.hash(password(env.ADMIN_PASSWORD), 12), 'admin']);
+    } else if (env.ADMIN_PASSWORD) {
+      // The deployment secret is consumed at startup only when it changes.
+      // It is never accepted as a permanent login bypass.
+      const configuredAdmin = String(env.ADMIN_USERNAME || 'admin').trim().toLowerCase();
+      const configuredPassword = String(env.ADMIN_PASSWORD);
+      const recoveryKey = hash(`${configuredAdmin}\0${configuredPassword}`);
+      const marker = await c.query("SELECT value FROM app_settings WHERE key='admin_recovery'");
+      if (marker.rows[0]?.value !== recoveryKey) {
+        const adminRow = r.rows[0];
+        await c.query('UPDATE users SET username=$1,password_hash=$2,must_change_password=FALSE WHERE id=$3', [configuredAdmin, await bcrypt.hash(password(configuredPassword), 12), adminRow.id]);
+        await c.query('DELETE FROM sessions WHERE user_id=$1', [adminRow.id]);
+        await c.query("INSERT INTO app_settings(key,value,updated_at) VALUES('admin_recovery',$1,NOW()) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=NOW()", [recoveryKey]);
+      }
     }
     const legacy = await c.query("SELECT id,name FROM customers WHERE normalized_name=''");
     for (const x of legacy.rows) await c.query('UPDATE customers SET normalized_name=$1 WHERE id=$2', [normalize(x.name), x.id]);
@@ -64,20 +77,6 @@ export function createApp(pool, { production = false } = {}) {
     if (typeof req.body.password !== 'string' || req.body.password.length > 128) fail('账号或密码错误', 401);
     let r = await pool.query('SELECT * FROM users WHERE lower(username)=$1', [username]);
     let u = r.rows[0];
-    // If the Render environment username was changed after the first boot, allow
-    // the configured admin credentials to recover the original admin row once.
-    // This avoids a confusing lockout when the database already contains `admin`
-    // but the dashboard environment is configured with a different username.
-    const configuredAdmin = String(process.env.ADMIN_USERNAME || '').trim().toLowerCase();
-    const configuredPassword = process.env.ADMIN_PASSWORD;
-    if (configuredAdmin && username === configuredAdmin && configuredPassword && req.body.password === configuredPassword) {
-      const existing = await pool.query("SELECT * FROM users WHERE role='admin' ORDER BY created_at LIMIT 1");
-      const replacement = u?.role === 'admin' ? u : existing.rows[0];
-      if (replacement) {
-        const updated = await pool.query('UPDATE users SET username=$1,password_hash=$2,must_change_password=FALSE WHERE id=$3 RETURNING *', [username, await bcrypt.hash(configuredPassword, 12), replacement.id]);
-        u = updated.rows[0];
-      }
-    }
     if (!u || !u.active || !await bcrypt.compare(req.body.password, u.password_hash)) fail('账号或密码错误', 401);
     const token = randomBytes(32).toString('base64url');
     await pool.query("INSERT INTO sessions(token,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL '7 days')", [hash(token), u.id]);
@@ -128,10 +127,10 @@ export function createApp(pool, { production = false } = {}) {
     if (!r.rows[0]?.avatar) fail('头像不存在或无权限', 404); res.type('png').send(Buffer.from(r.rows[0].avatar));
   }));
   async function matches(client, x, excludeId = '') {
-    const r = await client.query('SELECT id,name,sales_id,avatar_hash,avatar_dhash FROM customers WHERE normalized_name=$1 AND id<>$2', [x.normalized_name, excludeId]);
+    const r = await client.query('SELECT c.id,c.name,c.sales_id,c.created_at,c.avatar_hash,c.avatar_dhash,u.name AS sales_name FROM customers c JOIN users u ON u.id=c.sales_id WHERE c.normalized_name=$1 AND c.id<>$2', [x.normalized_name, excludeId]);
     return r.rows.map(c => ({ ...c, exact: !!x.hash && c.avatar_hash === x.hash, avatarSimilar: !!x.dhash && distance(x.dhash, c.avatar_dhash) <= 8 }));
   }
-  function matchPublic(c, user) { return { id: c.id, name: c.name, exact: c.exact, avatarSimilar: c.avatarSimilar, own: c.sales_id === user.id }; }
+  function matchPublic(c, user) { return { id: c.id, name: c.name, exact: c.exact, avatarSimilar: c.avatarSimilar, own: c.sales_id === user.id, registeredBy: c.sales_name || '未知业务员', registeredAt: c.created_at }; }
   app.post('/api/customers/check', wrap(async (req, res) => { const x = await customer(req.body); res.json({ matches: (await matches(pool, x)).map(c => matchPublic(c, req.user)) }); }));
   app.post('/api/customers', wrap(async (req, res) => {
     const x = await customer(req.body), c = await pool.connect();
